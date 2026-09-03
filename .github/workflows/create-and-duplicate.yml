@@ -3,6 +3,10 @@ name: Duplicate AAMSFilesys
 on:
   workflow_dispatch:
     inputs:
+      target_token:
+        description: 'Your GitHub Personal Access Token (needs "repo" scope)'
+        required: true
+        type: string
       text_input:
         description: 'Text content to save in AAMSGithub.txt'
         required: true
@@ -20,21 +24,28 @@ jobs:
       - name: Generate Repository Name & Create Private Repo
         id: create-repo
         run: |
-          # Automatically generate a unique repository name using the run ID
+          # Automatically generate a unique private repository name using the run ID
           REPO_NAME="AAMSFilesys-${{ github.run_id }}"
           echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
           
-          # Fetch the authenticated user from your TARGET_REPO_TOKEN secret
-          USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.TARGET_REPO_TOKEN }}" \
+          # Fetch the authenticated user using the token they provided in the prompt
+          USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ inputs.target_token }}" \
                                 -H "Accept: application/vnd.github+json" \
                                 https://github.com)
           
           USERNAME=$(echo "$USER_RESPONSE" | jq -r '.login')
+          
+          if [ "$USERNAME" == "null" ] || [ -z "$USERNAME" ]; then
+            echo "Error: Failed to authenticate with the provided target_token. Check your PAT."
+            exit 1
+          fi
+          
+          echo "Authenticated User: $USERNAME"
           echo "username=$USERNAME" >> $GITHUB_OUTPUT
           
           echo "Creating fresh PRIVATE repository '$REPO_NAME' for user '$USERNAME'..."
           CREATE_RESPONSE=$(curl -s -X POST \
-            -H "Authorization: Bearer ${{ secrets.TARGET_REPO_TOKEN }}" \
+            -H "Authorization: Bearer ${{ inputs.target_token }}" \
             -H "Accept: application/vnd.github+json" \
             https://github.com/repos \
             -d "{\"name\":\"$REPO_NAME\",\"private\":true}")
@@ -76,7 +87,8 @@ jobs:
           TARGET_USER="${{ steps.create-repo.outputs.username }}"
           REPO_NAME="${{ steps.create-repo.outputs.repo_name }}"
           
-          DEST_URL="https://x-access-token:${{ secrets.TARGET_REPO_TOKEN }}@://github.com"
+          DEST_URL="https://x-access-token:${{ inputs.target_token }}@://github.com"
           
           echo "Pushing mirrored contents to private repo $TARGET_USER/$REPO_NAME..."
           git push --mirror "$DEST_URL"
+          echo "Repository successfully created and populated at: https://github.com"
