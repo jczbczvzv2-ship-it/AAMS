@@ -1,0 +1,54 @@
+name: Duplicate AAMSFilesys
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo_url:
+        description: 'Full URL of the target repository (e.g., https://github.com)'
+        required: .true
+        type: string
+      text_input:
+        description: 'Text content to save in AAMSGithub.txt'
+        required: true
+        type: string
+
+jobs:
+  duplicate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Mirror Clone Source Repository (AAMSFilesys)
+        run: |
+          # Clones AAMSFilesys with all branches and tags
+          git clone --mirror https://x-token-auth:${{ secrets.SOURCE_REPO_TOKEN }}@://github.com source-repo.git
+
+      - name: Add AAMSGithub.txt to Mirror
+        run: |
+          cd source-repo.git
+          
+          # Clone a temporary working copy to add the file easily
+          cd ..
+          git clone source-repo.git working-copy
+          cd working-copy
+          
+          # Create the text file with the required name
+          echo "${{ inputs.text_input }}" > "AAMSGithub.txt"
+          
+          # Commit and push back to our local mirror
+          git add "AAMSGithub.txt"
+          git commit -m "chore: save workflow input to AAMSGithub.txt"
+          git push origin main
+
+      - name: Push to Target Repository
+        run: |
+          cd source-repo.git
+          
+          # Rewrite the target URL to include authentication credentials
+          TARGET_URL=$(echo "${{ inputs.target_repo_url }}" | sed 's|https://|https://x-access-token:${{ secrets.TARGET_REPO_TOKEN }}@|')
+          
+          # Push all branches, tags, and refs to the destination
+          git push --mirror "$TARGET_URL"
