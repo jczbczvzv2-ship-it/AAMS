@@ -1,21 +1,8 @@
-name: Create and Duplicate Repository
+name: Duplicate AAMSFilesys
 
 on:
   workflow_dispatch:
     inputs:
-      new_repo_name:
-        description: 'Name of the NEW repository to create (e.g., my-duplicated-repo)'
-        required: true
-        type: string
-      is_private:
-        description: 'Make the new repository private? (true/false)'
-        required: false
-        default: 'false'
-        type: boolean
-      target_token:
-        description: 'Your GitHub Personal Access Token (needs "repo" scope)'
-        required: true
-        type: string
       text_input:
         description: 'Text content to save in AAMSGithub.txt'
         required: true
@@ -30,41 +17,35 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@://github.com"
 
-      - name: Get Authenticated User Details & Create Fresh Repository
+      - name: Generate Repository Name & Create Private Repo
         id: create-repo
         run: |
-          # 1. Fetch the username of the user running the action using their token
-          USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ inputs.target_token }}" \
+          # Automatically generate a unique repository name using the run ID
+          REPO_NAME="AAMSFilesys-${{ github.run_id }}"
+          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
+          
+          # Fetch the authenticated user from your TARGET_REPO_TOKEN secret
+          USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.TARGET_REPO_TOKEN }}" \
                                 -H "Accept: application/vnd.github+json" \
                                 https://github.com)
           
           USERNAME=$(echo "$USER_RESPONSE" | jq -r '.login')
-          
-          if [ "$USERNAME" == "null" ] || [ -z "$USERNAME" ]; then
-            echo "Error: Failed to authenticate with the provided target_token. Check your PAT."
-            exit 1
-          fi
-          
-          echo "Authenticated GitHub User: $USERNAME"
           echo "username=$USERNAME" >> $GITHUB_OUTPUT
-
-          # 2. Create the new repository via GitHub REST API
-          echo "Creating fresh repository '${{ inputs.new_repo_name }}'..."
+          
+          echo "Creating fresh PRIVATE repository '$REPO_NAME' for user '$USERNAME'..."
           CREATE_RESPONSE=$(curl -s -X POST \
-            -H "Authorization: Bearer ${{ inputs.target_token }}" \
+            -H "Authorization: Bearer ${{ secrets.TARGET_REPO_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             https://github.com/repos \
-            -d "{\"name\":\"${{ inputs.new_repo_name }}\",\"private\":${{ inputs.is_private }}}")
+            -d "{\"name\":\"$REPO_NAME\",\"private\":true}")
             
-          # Check if repository creation succeeded
           REPO_CHECK=$(echo "$CREATE_RESPONSE" | jq -r '.full_name')
           if [ "$REPO_CHECK" == "null" ] || [ -z "$REPO_CHECK" ]; then
-            echo "Error creating repository. It might already exist or the token lacks permissions."
+            echo "Error creating repository:"
             echo "$CREATE_RESPONSE"
             exit 1
           fi
-          
-          echo "Successfully created repository: $REPO_CHECK"
+          echo "Successfully created private repo: $REPO_CHECK"
 
       - name: Mirror Clone Source Repository (AAMSFilesys)
         run: |
@@ -93,10 +74,9 @@ jobs:
           cd source-repo.git
           
           TARGET_USER="${{ steps.create-repo.outputs.username }}"
-          REPO_NAME="${{ inputs.new_repo_name }}"
+          REPO_NAME="${{ steps.create-repo.outputs.repo_name }}"
           
-          # Construct the destination repository URL with the user's token
-          DEST_URL="https://x-access-token:${{ inputs.target_token }}@://github.com"
+          DEST_URL="https://x-access-token:${{ secrets.TARGET_REPO_TOKEN }}@://github.com"
           
-          echo "Pushing mirrored contents to $TARGET_USER/$REPO_NAME..."
+          echo "Pushing mirrored contents to private repo $TARGET_USER/$REPO_NAME..."
           git push --mirror "$DEST_URL"
