@@ -1,0 +1,102 @@
+name: Duplicate AAMSFilesys to New Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_repo_name:
+        description: 'Name of the NEW repository to create (e.g., my-duplicated-repo)'
+        required: true
+        type: string
+      is_private:
+        description: 'Make the new repository private? (true/false)'
+        required: false
+        default: 'false'
+        type: boolean
+      target_token:
+        description: 'Your GitHub Personal Access Token (needs "repo" scope to create & push)'
+        required: true
+        type: string
+      text_input:
+        description: 'Text content to save in AAMSGithub.txt'
+        required: true
+        type: string
+
+jobs:
+  duplicate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get Authenticated User Details & Create Fresh Repository
+        id: create-repo
+        run: |
+          # 1. Fetch the username of the user running the action using their token
+          USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ inputs.target_token }}" \
+                                -H "Accept: application/vnd.github+json" \
+                                https://api.github.com/user)
+          
+          USERNAME=$(echo "$USER_RESPONSE" | jq -r '.login')
+          
+          if [ "$USERNAME" == "null" ] || [ -z "$USERNAME" ]; then
+            echo "Error: Failed to authenticate with the provided target_token. Check your PAT."
+            exit 1
+          fi
+          
+          echo "Authenticated GitHub User: $USERNAME"
+          echo "username=$USERNAME" >> $GITHUB_OUTPUT
+
+          # 2. Create the new repository via GitHub REST API
+          echo "Creating fresh repository '${{ inputs.new_repo_name }}'..."
+          CREATE_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ inputs.target_token }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user/repos \
+            -d "{\"name\":\"${{ inputs.new_repo_name }}\",\"private\":${{ inputs.is_private }}}")
+            
+          # Check if repository creation succeeded
+          REPO_CHECK=$(echo "$CREATE_RESPONSE" | jq -r '.full_name')
+          if [ "$REPO_CHECK" == "null" ] || [ -z "$REPO_CHECK" ]; then
+            echo "Error creating repository. It might already exist or the token lacks permissions."
+            echo "$CREATE_RESPONSE"
+            exit 1
+          fi
+          
+          echo "Successfully created repository: $REPO_CHECK"
+
+      - name: Mirror Clone Source Repository (AAMSFilesys)
+        run: |
+          # Clones AAMSFilesys using your source repository secret
+          git clone --mirror https://x-token-auth:${{ secrets.SOURCE_REPO_TOKEN }}@://github.com source-repo.git
+
+      - name: Add AAMSGithub.txt to Mirror
+        run: |
+          cd source-repo.git
+          
+          # Clone a temporary working copy to inject the file
+          cd ..
+          git clone source-repo.git working-copy
+          cd working-copy
+          
+          # Create the text file with the required name
+          echo "${{ inputs.text_input }}" > "AAMSGithub.txt"
+          
+          # Commit and push back to our local mirror
+          git add "AAMSGithub.txt"
+          git commit -m "chore: save workflow input to AAMSGithub.txt"
+          git push origin main
+
+      - name: Push to Fresh Target Repository
+        run: |
+          cd source-repo.git
+          
+          TARGET_USER="${{ steps.create-repo.outputs.username }}"
+          REPO_NAME="${{ inputs.new_repo_name }}"
+          
+          # Construct the destination repository URL with the user's token
+          DEST_URL="https://x-access-token:${{ inputs.target_token }}@://github.com"
+          
+          echo "Pushing mirrored contents to $TARGET_USER/$REPO_NAME..."
+          git push --mirror "$DEST_URL"
