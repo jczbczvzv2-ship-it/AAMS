@@ -19,7 +19,7 @@ jobs:
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Generate Repository Name & Create Private Repo
         id: create-repo
@@ -28,7 +28,7 @@ jobs:
           REPO_NAME="AAMSFilesys-${{ github.run_id }}"
           echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
           
-          # Fetch the authenticated user using the token they provided in the prompt
+          # Fetch the authenticated user using the correct GitHub API endpoint
           USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ inputs.target_token }}" \
                                 -H "Accept: application/vnd.github+json" \
                                 https://github.com)
@@ -36,13 +36,15 @@ jobs:
           USERNAME=$(echo "$USER_RESPONSE" | jq -r '.login')
           
           if [ "$USERNAME" == "null" ] || [ -z "$USERNAME" ]; then
-            echo "Error: Failed to authenticate with the provided target_token. Check your PAT."
+            echo "Error: Failed to authenticate with the provided target_token. API Response:"
+            echo "$USER_RESPONSE"
             exit 1
           fi
           
           echo "Authenticated User: $USERNAME"
           echo "username=$USERNAME" >> $GITHUB_OUTPUT
           
+          # Create fresh private repository using the correct API endpoint
           echo "Creating fresh PRIVATE repository '$REPO_NAME' for user '$USERNAME'..."
           CREATE_RESPONSE=$(curl -s -X POST \
             -H "Authorization: Bearer ${{ inputs.target_token }}" \
@@ -52,7 +54,7 @@ jobs:
             
           REPO_CHECK=$(echo "$CREATE_RESPONSE" | jq -r '.full_name')
           if [ "$REPO_CHECK" == "null" ] || [ -z "$REPO_CHECK" ]; then
-            echo "Error creating repository:"
+            echo "Error creating repository. API Response:"
             echo "$CREATE_RESPONSE"
             exit 1
           fi
