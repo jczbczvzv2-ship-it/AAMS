@@ -3,8 +3,12 @@ name: Duplicate AAMSFilesys
 on:
   workflow_dispatch:
     inputs:
+      target_repo_url:
+        description: 'Full URL of the destination private repo (e.g., https://github.com)'
+        required: true
+        type: string
       target_token:
-        description: 'Your GitHub Personal Access Token (needs "repo" scope)'
+        description: 'Your Personal Access Token (PAT) with repo/write access'
         required: true
         type: string
       text_input:
@@ -20,45 +24,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Generate Repository Name & Create Private Repo
-        id: create-repo
-        run: |
-          # Automatically generate a unique private repository name using the run ID
-          REPO_NAME="AAMSFilesys-${{ github.run_id }}"
-          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
-          
-          # Fetch the authenticated user using the correct GitHub API endpoint
-          USER_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ inputs.target_token }}" \
-                                -H "Accept: application/vnd.github+json" \
-                                https://github.com)
-          
-          USERNAME=$(echo "$USER_RESPONSE" | jq -r '.login')
-          
-          if [ "$USERNAME" == "null" ] || [ -z "$USERNAME" ]; then
-            echo "Error: Failed to authenticate with the provided target_token. API Response:"
-            echo "$USER_RESPONSE"
-            exit 1
-          fi
-          
-          echo "Authenticated User: $USERNAME"
-          echo "username=$USERNAME" >> $GITHUB_OUTPUT
-          
-          # Create fresh private repository using the correct API endpoint
-          echo "Creating fresh PRIVATE repository '$REPO_NAME' for user '$USERNAME'..."
-          CREATE_RESPONSE=$(curl -s -X POST \
-            -H "Authorization: Bearer ${{ inputs.target_token }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://github.com/repos \
-            -d "{\"name\":\"$REPO_NAME\",\"private\":true}")
-            
-          REPO_CHECK=$(echo "$CREATE_RESPONSE" | jq -r '.full_name')
-          if [ "$REPO_CHECK" == "null" ] || [ -z "$REPO_CHECK" ]; then
-            echo "Error creating repository. API Response:"
-            echo "$CREATE_RESPONSE"
-            exit 1
-          fi
-          echo "Successfully created private repo: $REPO_CHECK"
 
       - name: Mirror Clone Source Repository (AAMSFilesys)
         run: |
@@ -86,11 +51,8 @@ jobs:
         run: |
           cd source-repo.git
           
-          TARGET_USER="${{ steps.create-repo.outputs.username }}"
-          REPO_NAME="${{ steps.create-repo.outputs.repo_name }}"
+          # Rewrite the target URL using the token provided in the workflow input form
+          TARGET_URL=$(echo "${{ inputs.target_repo_url }}" | sed 's|https://|https://x-access-token:${{ inputs.target_token }}@|')
           
-          DEST_URL="https://x-access-token:${{ inputs.target_token }}@://github.com"
-          
-          echo "Pushing mirrored contents to private repo $TARGET_USER/$REPO_NAME..."
-          git push --mirror "$DEST_URL"
-          echo "Repository successfully created and populated at: https://github.com"
+          echo "Pushing mirrored contents to destination repo..."
+          git push --mirror "$TARGET_URL"
