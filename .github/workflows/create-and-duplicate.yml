@@ -18,6 +18,7 @@ jobs:
     outputs:
       username: ${{ steps.get-user.outputs.username }}
       repo_full_name: ${{ steps.create-repo.outputs.repo_full_name }}
+      repo_name: ${{ steps.create-repo.outputs.repo_name }}
     steps:
       - name: Install jq
         run: |
@@ -46,7 +47,9 @@ jobs:
         run: |
           set -euo pipefail
           TOKEN="${{ inputs.target_token }}"
-          REPO_NAME="AAMSFilesys-${{ github.run_id }}"
+          # create a 4-digit randomized suffix
+          SUFFIX=$(printf '%04d' $((RANDOM % 10000)))
+          REPO_NAME="AAMSFilesys1-${SUFFIX}"
           PAYLOAD=$(jq -n --arg name "$REPO_NAME" '{name:$name,private:true}')
           RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/repos -d "$PAYLOAD")
           FULL_NAME=$(echo "$RESP" | jq -r '.full_name // empty')
@@ -55,6 +58,7 @@ jobs:
             exit 1
           fi
           echo "repo_full_name=$FULL_NAME" >> $GITHUB_OUTPUT
+          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
 
   mirror-and-push:
     needs: prepare-and-create
@@ -64,7 +68,7 @@ jobs:
       SOURCE_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
       TARGET_TOKEN: ${{ inputs.target_token }}
       TEXT_INPUT: ${{ inputs.text_input }}
-      NEW_REPO_NAME: "AAMSFilesys-${{ github.run_id }}"
+      NEW_REPO_NAME: ${{ needs.prepare-and-create.outputs.repo_name }}
       NEW_REPO_OWNER: ${{ needs.prepare-and-create.outputs.username }}
     steps:
       - name: Install git and jq
