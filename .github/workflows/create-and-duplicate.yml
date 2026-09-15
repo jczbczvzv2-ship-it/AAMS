@@ -1,58 +1,119 @@
-name: Duplicate AAMSFilesys
+name: Create and Duplicate AAMSFilesys
 
 on:
   workflow_dispatch:
     inputs:
-      target_repo_url:
-        description: 'Full URL of the destination private repo (e.g., https://github.com)'
-        required: true
-        type: string
       target_token:
-        description: 'Your Personal Access Token (PAT) with repo/write access'
+        description: 'Personal access token (PAT) to create and push to the new private repo'
         required: true
         type: string
       text_input:
-        description: 'Text content to save in AAMSGithub.txt'
+        description: 'Text to save into AAMSGithub.txt'
         required: true
         type: string
 
 jobs:
-  duplicate:
+  prepare-and-create:
     runs-on: ubuntu-latest
+    outputs:
+      username: ${{ steps.get-user.outputs.username }}
+      repo_full_name: ${{ steps.create-repo.outputs.repo_full_name }}
     steps:
-      - name: Configure Git
+      - name: Install jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Mask target token
+        run: echo "::add-mask::${{ inputs.target_token }}"
+
+      - name: Get authenticated username
+        id: get-user
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN="${{ inputs.target_token }}"
+          USER_JSON=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user)
+          USERNAME=$(echo "$USER_JSON" | jq -r '.login // empty')
+          if [ -z "$USERNAME" ]; then
+            echo "Failed to fetch username: $USER_JSON"
+            exit 1
+          fi
+          echo "username=$USERNAME" >> $GITHUB_OUTPUT
+
+      - name: Create private repository
+        id: create-repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN="${{ inputs.target_token }}"
+          REPO_NAME="AAMSFilesys-${{ github.run_id }}"
+          PAYLOAD=$(jq -n --arg name "$REPO_NAME" '{name:$name,private:true}')
+          RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/repos -d "$PAYLOAD")
+          FULL_NAME=$(echo "$RESP" | jq -r '.full_name // empty')
+          if [ -z "$FULL_NAME" ]; then
+            echo "Failed to create repo: $RESP"
+            exit 1
+          fi
+          echo "repo_full_name=$FULL_NAME" >> $GITHUB_OUTPUT
+
+  mirror-and-push:
+    needs: prepare-and-create
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPO: jczbczvzv2-ship-it/AAMSFilesys
+      SOURCE_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+      TARGET_TOKEN: ${{ inputs.target_token }}
+      TEXT_INPUT: ${{ inputs.text_input }}
+      NEW_REPO_NAME: "AAMSFilesys-${{ github.run_id }}"
+      NEW_REPO_OWNER: ${{ needs.prepare-and-create.outputs.username }}
+    steps:
+      - name: Install git and jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y git jq
+
+      - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Mirror Clone Source Repository (AAMSFilesys)
+      - name: Mirror-clone source repository
+        shell: bash
         run: |
-          # Clones AAMSFilesys using your source repository secret
-          git clone --mirror https://x-token-auth:${{ secrets.SOURCE_REPO_TOKEN }}@://github.com source-repo.git
+          set -euo pipefail
+          SRC_URL="https://x-access-token:${SOURCE_TOKEN}@github.com/${SOURCE_REPO}.git"
+          echo "Cloning (mirror) ${SRC_URL}"
+          git clone --mirror "${SRC_URL}" source.git
 
-      - name: Add AAMSGithub.txt to Mirror
+      - name: Create writable working copy and inject file
+        shell: bash
         run: |
-          cd source-repo.git
-          
-          # Clone a temporary working copy to inject the file
-          cd ..
-          git clone source-repo.git working-copy
-          cd working-copy
-          
-          # Create the text file with the required name
-          echo "${{ inputs.text_input }}" > "AAMSGithub.txt"
-          
-          # Commit and push back to our local mirror
-          git add "AAMSGithub.txt"
-          git commit -m "chore: save workflow input to AAMSGithub.txt"
-          git push origin main
+          set -euo pipefail
+          # create a working clone from the mirror
+          git clone source.git working
+          cd working
+          # determine default branch from remote
+          DEFAULT_BRANCH=$(git remote show origin | sed -n 's/  HEAD branch: //p')
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            # fallback to main
+            DEFAULT_BRANCH=main
+          fi
+          git checkout -b "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" || git checkout "$DEFAULT_BRANCH" || true
 
-      - name: Push to Fresh Target Repository
+          printf '%s\n' "${TEXT_INPUT}" > AAMSGithub.txt
+          git add AAMSGithub.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: add AAMSGithub.txt from workflow"
+          fi
+
+      - name: Push all refs (mirror) to new private repository
+        shell: bash
         run: |
-          cd source-repo.git
-          
-          # Rewrite the target URL using the token provided in the workflow input form
-          TARGET_URL=$(echo "${{ inputs.target_repo_url }}" | sed 's|https://|https://x-access-token:${{ inputs.target_token }}@|')
-          
-          echo "Pushing mirrored contents to destination repo..."
-          git push --mirror "$TARGET_URL"
+          set -euo pipefail
+          DEST_URL="https://x-access-token:${TARGET_TOKEN}@github.com/${NEW_REPO_OWNER}/${NEW_REPO_NAME}.git"
+          echo "Pushing (mirror) to ${DEST_URL}"
+          # push from the mirror repo to preserve refs, include the new commit from working by pushing its branch
+          git -C source.git push --mirror "${DEST_URL}" || true
+          # also push the working branch to ensure the injected file exists
+          git -C working push "${DEST_URL}" +HEAD:refs/heads/$(git -C working rev-parse --abbrev-ref HEAD)
