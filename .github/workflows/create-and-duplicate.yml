@@ -1,4 +1,4 @@
-name: Create and Duplicate AAMSFilesys
+name: create-and-duplicate.yml
 
 on:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           TOKEN="${{ inputs.target_token }}"
-          USER_JSON=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user)
+          USER_JSON=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com)
           USERNAME=$(echo "$USER_JSON" | jq -r '.login // empty')
           if [ -z "$USERNAME" ]; then
             echo "Failed to fetch username: $USER_JSON"
@@ -51,7 +51,7 @@ jobs:
           SUFFIX=$(printf '%04d' $((RANDOM % 10000)))
           REPO_NAME="AAMSFilesys1-${SUFFIX}"
           PAYLOAD=$(jq -n --arg name "$REPO_NAME" '{name:$name,private:true}')
-          RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/repos -d "$PAYLOAD")
+          RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com/repos -d "$PAYLOAD")
           FULL_NAME=$(echo "$RESP" | jq -r '.full_name // empty')
           if [ -z "$FULL_NAME" ]; then
             echo "Failed to create repo: $RESP"
@@ -78,13 +78,13 @@ jobs:
       - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.email "github-actions[bot]@://github.com"
 
       - name: Mirror-clone source repository
         shell: bash
         run: |
           set -euo pipefail
-          SRC_URL="https://x-access-token:${SOURCE_TOKEN}@github.com/${SOURCE_REPO}.git"
+          SRC_URL="https://x-access-token:${SOURCE_TOKEN}@://github.com{SOURCE_REPO}.git"
           echo "Cloning (mirror) ${SRC_URL}"
           git clone --mirror "${SRC_URL}" source.git
 
@@ -115,7 +115,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DEST_URL="https://x-access-token:${TARGET_TOKEN}@github.com/${NEW_REPO_OWNER}/${NEW_REPO_NAME}.git"
+          DEST_URL="https://x-access-token:${TARGET_TOKEN}@://github.com{NEW_REPO_OWNER}/${NEW_REPO_NAME}.git"
           echo "Pushing (mirror) to ${DEST_URL}"
           # push from the mirror repo to preserve refs, include the new commit from working by pushing its branch
           git -C source.git push --mirror "${DEST_URL}" || true
