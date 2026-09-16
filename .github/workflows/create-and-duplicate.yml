@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       text_input:
-        description: 'Text to save into AAMSGithub.txt'
+        description: 'Contents of the imported .txt document; must contain a numerical Account ID'
         required: true
         type: string
 
@@ -44,12 +44,17 @@ jobs:
       - name: Create private repository
         id: create-repo
         shell: bash
+        env:
+          ACCOUNT_TEXT: ${{ inputs.text_input }}
         run: |
           set -euo pipefail
           TOKEN="${{ inputs.target_token }}"
-          # create a 4-digit randomized suffix
-          SUFFIX=$(printf '%04d' $((RANDOM % 10000)))
-          REPO_NAME="AAMSFilesys1-${SUFFIX}"
+          ACCOUNT_ID=$(printf '%s\n' "$ACCOUNT_TEXT" | grep -oE '[0-9]+' | head -n 1 || true)
+          if ! [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR:502"
+            exit 1
+          fi
+          REPO_NAME="AAMSFilesys1-${ACCOUNT_ID}"
           PAYLOAD=$(jq -n --arg name "$REPO_NAME" '{name:$name,private:true}')
           RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com/repos -d "$PAYLOAD")
           FULL_NAME=$(echo "$RESP" | jq -r '.full_name // empty')
