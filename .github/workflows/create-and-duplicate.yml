@@ -1,4 +1,4 @@
-name: create-and-duplicate.yml
+name: Create and Duplicate AAMSFilesys
 
 on:
   workflow_dispatch:
@@ -33,7 +33,14 @@ jobs:
         run: |
           set -euo pipefail
           TOKEN="${{ inputs.target_token }}"
-          USER_JSON=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com)
+          if [ -z "$TOKEN" ]; then
+            echo "target_token input is empty"
+            exit 1
+          fi
+          # retry curl a few times for transient network errors
+          for i in 1 2 3; do
+            USER_JSON=$(curl -fS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user) && break || sleep 2
+          done
           USERNAME=$(echo "$USER_JSON" | jq -r '.login // empty')
           if [ -z "$USERNAME" ]; then
             echo "Failed to fetch username: $USER_JSON"
@@ -47,11 +54,17 @@ jobs:
         run: |
           set -euo pipefail
           TOKEN="${{ inputs.target_token }}"
-          # create a 4-digit randomized suffix
-          SUFFIX=$(printf '%04d' $((RANDOM % 10000)))
-          REPO_NAME="AAMSFilesys1-${SUFFIX}"
+          if [ -z "$TOKEN" ]; then
+            echo "target_token input is empty"
+            exit 1
+          fi
+          # generate a 5-digit randomized code (00000-99999)
+          SUFFIX=$(awk 'BEGIN {srand(); printf "%05d", int(rand()*100000)}')
+          REPO_NAME="AAMSFileSys-#${SUFFIX}"
           PAYLOAD=$(jq -n --arg name "$REPO_NAME" '{name:$name,private:true}')
-          RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com/repos -d "$PAYLOAD")
+          for i in 1 2 3; do
+            RESP=$(curl -fS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/repos -d "$PAYLOAD") && break || sleep 2
+          done
           FULL_NAME=$(echo "$RESP" | jq -r '.full_name // empty')
           if [ -z "$FULL_NAME" ]; then
             echo "Failed to create repo: $RESP"
@@ -78,30 +91,34 @@ jobs:
       - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Mirror-clone source repository
         shell: bash
         run: |
           set -euo pipefail
-          SRC_URL="https://x-access-token:${SOURCE_TOKEN}@://github.com{SOURCE_REPO}.git"
+          if [ -z "${SOURCE_TOKEN:-}" ]; then
+            echo "Missing SOURCE_REPO_TOKEN secret"
+            exit 1
+          fi
+          SRC_URL="https://x-access-token:${SOURCE_TOKEN}@github.com/${SOURCE_REPO}.git"
           echo "Cloning (mirror) ${SRC_URL}"
-          git clone --mirror "${SRC_URL}" source.git
+          git clone --mirror --quiet "${SRC_URL}" source.git
 
-      - name: Create writable working copy and inject file
+      - name: Create working copy and inject AAMSGithub.txt
         shell: bash
         run: |
           set -euo pipefail
-          # create a working clone from the mirror
-          git clone source.git working
+          git clone --quiet source.git working
           cd working
-          # determine default branch from remote
-          DEFAULT_BRANCH=$(git remote show origin | sed -n 's/  HEAD branch: //p')
-          if [ -z "$DEFAULT_BRANCH" ]; then
-            # fallback to main
-            DEFAULT_BRANCH=main
+          # pick a branch to work on (fallback to main)
+          FIRST_BRANCH=$(git for-each-ref --format='%(refname:short)' refs/heads | head -n1 || true)
+          if [ -n "$FIRST_BRANCH" ]; then
+            git checkout "$FIRST_BRANCH" || git checkout -b "$FIRST_BRANCH"
+          else
+            git checkout --orphan main
+            git reset --quiet
           fi
-          git checkout -b "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" || git checkout "$DEFAULT_BRANCH" || true
 
           printf '%s\n' "${TEXT_INPUT}" > AAMSGithub.txt
           git add AAMSGithub.txt
@@ -111,13 +128,20 @@ jobs:
             git commit -m "chore: add AAMSGithub.txt from workflow"
           fi
 
-      - name: Push all refs (mirror) to new private repository
+      - name: Push mirror and working changes to new private repo
         shell: bash
         run: |
           set -euo pipefail
-          DEST_URL="https://x-access-token:${TARGET_TOKEN}@://github.com{NEW_REPO_OWNER}/${NEW_REPO_NAME}.git"
+          if [ -z "${TARGET_TOKEN:-}" ]; then
+            echo "target_token input is empty"
+            exit 1
+          fi
+          # URL-encode '#' so it is safe in the push URL
+          ENCODED_REPO_NAME=${NEW_REPO_NAME//\#/%23}
+          DEST_URL="https://x-access-token:${TARGET_TOKEN}@github.com/${NEW_REPO_OWNER}/${ENCODED_REPO_NAME}.git"
           echo "Pushing (mirror) to ${DEST_URL}"
-          # push from the mirror repo to preserve refs, include the new commit from working by pushing its branch
           git -C source.git push --mirror "${DEST_URL}" || true
-          # also push the working branch to ensure the injected file exists
-          git -C working push "${DEST_URL}" +HEAD:refs/heads/$(git -C working rev-parse --abbrev-ref HEAD)
+          # ensure the working branch (with injected file) is pushed
+          BRANCH=$(git -C working rev-parse --abbrev-ref HEAD)
+          git -C working push "${DEST_URL}" +HEAD:refs/heads/${BRANCH} || true
+          echo "Repository pushed: https://github.com/${NEW_REPO_OWNER}/${NEW_REPO_NAME}"
