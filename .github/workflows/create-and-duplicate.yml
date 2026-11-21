@@ -1,5 +1,4 @@
 name: Create and Duplicate AAMSFilesys
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,7 +7,11 @@ on:
         required: true
         type: string
       text_input:
-        description: 'Contents of the imported .txt document; must contain a numerical Account ID'
+        description: 'Text to save into AAMSGithub.txt'
+        required: true
+        type: string
+      account_id_file:
+        description: 'Path to the .txt file in the source repository containing the numerical Account ID'
         required: true
         type: string
 
@@ -25,15 +28,50 @@ jobs:
           sudo apt-get update && sudo apt-get install -y jq
 
       - name: Mask target token
-        run: echo "::add-mask::${{ inputs.target_token }}"
+        env:
+          TARGET_TOKEN: ${{ inputs.target_token }}
+        run: echo "::add-mask::$TARGET_TOKEN"
+
+      - name: Read Account ID file
+        id: get-account-id
+        shell: bash
+        env:
+          SOURCE_REPO: jczbczvzv2-ship-it/AAMSFilesys
+          SOURCE_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ACCOUNT_ID_FILE: ${{ inputs.account_id_file }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACCOUNT_ID_FILE" != *.txt || "$ACCOUNT_ID_FILE" == /* || "$ACCOUNT_ID_FILE" == *..* ]]; then
+            echo "ERROR:502"
+            exit 1
+          fi
+          if ! GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${SOURCE_TOKEN}" \
+            git clone --depth 1 "https://github.com/${SOURCE_REPO}.git" source-account-id; then
+            echo "ERROR:502"
+            exit 1
+          fi
+          ACCOUNT_FILE="source-account-id/$ACCOUNT_ID_FILE"
+          if [ ! -f "$ACCOUNT_FILE" ]; then
+            echo "ERROR:502"
+            exit 1
+          fi
+          ACCOUNT_ID=$(grep -m 1 -oE '[0-9]+' "$ACCOUNT_FILE" | head -n 1 || true)
+          if ! [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]; then
+            echo "ERROR:502"
+            exit 1
+          fi
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Get authenticated username
         id: get-user
         shell: bash
+        env:
+          TOKEN: ${{ inputs.target_token }}
         run: |
           set -euo pipefail
-          TOKEN="${{ inputs.target_token }}"
-          USER_JSON=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com)
+          USER_JSON=$(curl --fail-with-body -sS -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user)
           USERNAME=$(echo "$USER_JSON" | jq -r '.login // empty')
           if [ -z "$USERNAME" ]; then
             echo "Failed to fetch username: $USER_JSON"
@@ -45,18 +83,13 @@ jobs:
         id: create-repo
         shell: bash
         env:
-          ACCOUNT_TEXT: ${{ inputs.text_input }}
+          TOKEN: ${{ inputs.target_token }}
+          ACCOUNT_ID: ${{ steps.get-account-id.outputs.account_id }}
         run: |
           set -euo pipefail
-          TOKEN="${{ inputs.target_token }}"
-          ACCOUNT_ID=$(printf '%s\n' "$ACCOUNT_TEXT" | grep -oE '[0-9]+' | head -n 1 || true)
-          if ! [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]; then
-            echo "ERROR:502"
-            exit 1
-          fi
           REPO_NAME="AAMSFilesys1-${ACCOUNT_ID}"
           PAYLOAD=$(jq -n --arg name "$REPO_NAME" '{name:$name,private:true}')
-          RESP=$(curl -sS -H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json" https://github.com/repos -d "$PAYLOAD")
+          RESP=$(curl --fail-with-body -sS -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/repos -d "$PAYLOAD")
           FULL_NAME=$(echo "$RESP" | jq -r '.full_name // empty')
           if [ -z "$FULL_NAME" ]; then
             echo "Failed to create repo: $RESP"
@@ -83,15 +116,20 @@ jobs:
       - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Mirror-clone source repository
         shell: bash
         run: |
           set -euo pipefail
-          SRC_URL="https://x-access-token:${SOURCE_TOKEN}@://github.com{SOURCE_REPO}.git"
-          echo "Cloning (mirror) ${SRC_URL}"
-          git clone --mirror "${SRC_URL}" source.git
+          echo "Cloning source repository ${SOURCE_REPO}"
+          if ! GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${SOURCE_TOKEN}" \
+            git clone --mirror "https://github.com/${SOURCE_REPO}.git" source.git; then
+            echo "Source repository clone failed"
+            exit 1
+          fi
 
       - name: Create writable working copy and inject file
         shell: bash
@@ -101,12 +139,14 @@ jobs:
           git clone source.git working
           cd working
           # determine default branch from remote
-          DEFAULT_BRANCH=$(git remote show origin | sed -n 's/  HEAD branch: //p')
+          DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
           if [ -z "$DEFAULT_BRANCH" ]; then
-            # fallback to main
             DEFAULT_BRANCH=main
           fi
-          git checkout -b "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" || git checkout "$DEFAULT_BRANCH" || true
+          if ! git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"; then
+            echo "Unable to check out source default branch: $DEFAULT_BRANCH"
+            exit 1
+          fi
 
           printf '%s\n' "${TEXT_INPUT}" > AAMSGithub.txt
           git add AAMSGithub.txt
@@ -120,9 +160,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DEST_URL="https://x-access-token:${TARGET_TOKEN}@://github.com{NEW_REPO_OWNER}/${NEW_REPO_NAME}.git"
-          echo "Pushing (mirror) to ${DEST_URL}"
+          echo "Pushing mirror to ${NEW_REPO_OWNER}/${NEW_REPO_NAME}"
           # push from the mirror repo to preserve refs, include the new commit from working by pushing its branch
-          git -C source.git push --mirror "${DEST_URL}" || true
+          if ! GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${TARGET_TOKEN}" \
+            git -C source.git push --mirror "https://github.com/${NEW_REPO_OWNER}/${NEW_REPO_NAME}.git"; then
+            echo "Mirror push failed"
+            exit 1
+          fi
           # also push the working branch to ensure the injected file exists
-          git -C working push "${DEST_URL}" +HEAD:refs/heads/$(git -C working rev-parse --abbrev-ref HEAD)
+          BRANCH=$(git -C working rev-parse --abbrev-ref HEAD)
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${TARGET_TOKEN}" \
+          git -C working push "https://github.com/${NEW_REPO_OWNER}/${NEW_REPO_NAME}.git" "+HEAD:refs/heads/${BRANCH}"
